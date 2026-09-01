@@ -37,7 +37,11 @@ public class CinemaModeController : BaseController
     public ActionResult Random(int? n)
     {
         var pool = PoolManager(); if (pool == null || ModInit.conf == null) return ContentTo("[]", "application/json");
-        var picked = pool.PickRandom(ModInit.conf.storage_path, Math.Clamp(n ?? ModInit.conf.trailers_per_movie, 1, ModInit.conf.pool_size));
+        // When the operator has disabled the module, return an empty playlist so Lampa falls through cleanly.
+        var conf = ModInit.conf;
+        if (!conf.enabled) return ContentTo("[]", "application/json");
+        var perRequest = n ?? conf.trailers_per_movie;
+        var picked = pool.PickRandom(conf.storage_path, Math.Clamp(perRequest, 1, Math.Min(10, Math.Max(1, conf.pool_size))));
         return ContentTo(Newtonsoft.Json.JsonConvert.SerializeObject(picked.Select(t => new { url = $"{host}/{t.file_url}", title = t.title }).ToArray()), "application/json");
     }
 
@@ -45,7 +49,21 @@ public class CinemaModeController : BaseController
     public async Task<ActionResult> Refresh(CancellationToken ct)
     {
         var pool = PoolManager(); if (pool == null || ModInit.conf == null) return ContentTo("{}", "application/json");
-        try { return ContentTo(Newtonsoft.Json.JsonConvert.SerializeObject(await pool.RefreshAsync(ModInit.conf.channel, ModInit.conf.pool_size, ModInit.conf.max_height, ModInit.conf.storage_path, ct).ConfigureAwait(false)), "application/json"); }
+        var conf = ModInit.conf;
+        try
+        {
+            if (!conf.enabled)
+            {
+                return ContentTo("{\"disabled\":true}", "application/json");
+            }
+            var sources = conf.EffectiveSources();
+            if (sources.Count == 0)
+            {
+                return ContentTo("{\"error\":\"no_sources\"}", "application/json");
+            }
+            var updated = await pool.RefreshAsync(sources, conf.pool_size, conf.max_height, conf.storage_path, conf.delete_old, ct).ConfigureAwait(false);
+            return ContentTo(Newtonsoft.Json.JsonConvert.SerializeObject(updated), "application/json");
+        }
         catch (Exception ex)
         {
             var logger = HttpContext.RequestServices.GetService(typeof(ILogger<CinemaModeController>)) as ILogger<CinemaModeController>;
@@ -58,7 +76,16 @@ public class CinemaModeController : BaseController
     public async Task<ActionResult> Status()
     {
         var pool = PoolManager(); if (pool == null || ModInit.conf == null) return ContentTo("not_loaded", "text/plain");
-        var index = await pool.LoadAsync().ConfigureAwait(false); var ready = pool.ReadyEntries(index, ModInit.conf.storage_path);
-        return ContentTo($"channel={index.channel}\npool_size={ready.Count}\ndownloaded={ready.Count}\nupdated_at={index.updated_at}\n", "text/plain");
+        var conf = ModInit.conf;
+        var index = await pool.LoadAsync().ConfigureAwait(false); var ready = pool.ReadyEntries(index, conf.storage_path);
+        return ContentTo(
+            $"enabled={conf.enabled}\n" +
+            $"delete_old={conf.delete_old}\n" +
+            $"trailers_per_movie={conf.trailers_per_movie}\n" +
+            $"sources={index.channel}\n" +
+            $"pool_size={ready.Count}\n" +
+            $"downloaded={ready.Count}\n" +
+            $"updated_at={index.updated_at}\n",
+            "text/plain");
     }
 }

@@ -118,18 +118,67 @@ public class TrailerPoolManager
         }).ToList();
     }
 
-    public async Task<PoolIndex> RefreshAsync(string channel, int poolSize, int maxHeight, string storagePath, CancellationToken ct)
+    /// <summary>True when the trailer pool is enabled. Callers must honour this and short-circuit.</summary>
+    public bool IsEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Refreshes the pool by pulling the latest trailers from each configured source, deduping by YouTube id,
+    /// downloading new entries until the bounded pool is full, and (optionally) evicting oldest owned files.
+    /// Hard cap of <see cref="HardPoolCap"/> is always enforced on <paramref name="poolSize"/>.
+    /// </summary>
+    public async Task<PoolIndex> RefreshAsync(IReadOnlyList<string> sources, int poolSize, int maxHeight, string storagePath, bool deleteOld, CancellationToken ct)
     {
         poolSize = Math.Clamp(poolSize, 1, HardPoolCap); maxHeight = maxHeight <= 0 ? 1080 : maxHeight;
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             var storage = ResolveStoragePath(storagePath);
-            var latest = await FetchLatestAsync(channel, poolSize, storagePath, ct).ConfigureAwait(false);
+            var cleanSources = (sources ?? Array.Empty<string>())
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Select(s => s.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (cleanSources.Count == 0)
+            {
+                _log.LogWarning("CinemaMode: refresh skipped because no sources configured");
+                return await LoadAsync().ConfigureAwait(false);
+            }
+
+            // Fetch the latest poolSize entries from every source so we have enough to dedupe + fill the pool.
+            var merged = new Dictionary<string, TrailerRecord>(StringComparer.Ordinal);
+            foreach (var src in cleanSources)
+            {
+                ct.ThrowIfCancellationRequested();
+                var fetched = await FetchLatestAsync(src, poolSize, storagePath, ct).ConfigureAwait(false);
+                foreach (var trailer in fetched)
+                {
+                    if (merged.TryGetValue(trailer.id, out var existing))
+                    {
+                        // Keep the newest upload_date when the same video appears on multiple sources.
+                        if (UploadDateComparer.Instance.Compare(trailer.upload_date, existing.upload_date) > 0)
+                        {
+                            merged[trailer.id] = trailer;
+                        }
+                    }
+                    else
+                    {
+                        merged[trailer.id] = trailer;
+                    }
+                }
+            }
+
+            // upload_date is YYYYMMDD so ordinal string comparison matches newest-first when sorted descending.
+            var latest = merged.Values
+                .OrderByDescending(t => t.upload_date, UploadDateComparer.Instance)
+                .Take(poolSize)
+                .ToList();
+
             if (latest.Count == 0) { _log.LogWarning("CinemaMode: refresh skipped because latest playlist is empty"); return await LoadAsync().ConfigureAwait(false); }
-            var existing = await LoadAsync().ConfigureAwait(false);
-            var byId = existing.trailers.Where(t => YouTubeId.IsMatch(t.id)).GroupBy(t => t.id).ToDictionary(g => g.Key, g => g.First());
-            var next = new PoolIndex { channel = channel, updated_at = DateTime.UtcNow.ToString("o"), trailers = new List<TrailerRecord>() };
+
+            var existingIndex = await LoadAsync().ConfigureAwait(false);
+            var byId = existingIndex.trailers.Where(t => YouTubeId.IsMatch(t.id)).GroupBy(t => t.id).ToDictionary(g => g.Key, g => g.First());
+            var next = new PoolIndex { channel = string.Join(",", cleanSources), updated_at = DateTime.UtcNow.ToString("o"), trailers = new List<TrailerRecord>() };
             foreach (var trailer in latest)
             {
                 var target = Path.Combine(storage, trailer.id + ".mp4");
@@ -143,14 +192,24 @@ public class TrailerPoolManager
                 if (!result.ok) { _log.LogWarning("CinemaMode: download failed for {Id}: {Error}", trailer.id, result.stderr); continue; }
                 trailer.downloaded_at = DateTime.UtcNow.ToString("o"); trailer.size_bytes = new FileInfo(target).Length; next.trailers.Add(trailer);
             }
-            // Retention only deletes files inside the owned subdirectory. Other wwwroot content is untouched.
-            var owned = Directory.EnumerateFiles(storage, "*.mp4").Select(path => new FileInfo(path)).Where(IsOwnedFile).OrderBy(f => f.LastWriteTimeUtc).ToList();
-            while (owned.Count > poolSize)
+
+            // Retention only ever touches files inside the owned subdirectory. When delete_old is false we
+            // still leave files outside that subdirectory alone but skip the in-subdir eviction entirely.
+            if (deleteOld)
             {
-                var victim = owned[0]; victim.Delete(); owned.RemoveAt(0);
-                next.trailers.RemoveAll(t => string.Equals(t.id, Path.GetFileNameWithoutExtension(victim.Name), StringComparison.Ordinal));
-                _log.LogInformation("CinemaMode: retention evicted {File}", victim.Name);
+                var owned = Directory.EnumerateFiles(storage, "*.mp4").Select(path => new FileInfo(path)).Where(IsOwnedFile).OrderBy(f => f.LastWriteTimeUtc).ToList();
+                while (owned.Count > poolSize)
+                {
+                    var victim = owned[0]; victim.Delete(); owned.RemoveAt(0);
+                    next.trailers.RemoveAll(t => string.Equals(t.id, Path.GetFileNameWithoutExtension(victim.Name), StringComparison.Ordinal));
+                    _log.LogInformation("CinemaMode: retention evicted {File}", victim.Name);
+                }
             }
+            else
+            {
+                _log.LogInformation("CinemaMode: delete_old=false, retaining all owned files in {Dir}", storage);
+            }
+
             next.trailers = ReadyEntries(next, storagePath);
             await SaveAsync(next).ConfigureAwait(false);
             return next;
@@ -158,9 +217,28 @@ public class TrailerPoolManager
         finally { _gate.Release(); }
     }
 
+    /// <summary>Legacy single-channel overload kept for backward compatibility.</summary>
+    public Task<PoolIndex> RefreshAsync(string channel, int poolSize, int maxHeight, string storagePath, CancellationToken ct)
+        => RefreshAsync(new[] { channel }, poolSize, maxHeight, storagePath, deleteOld: true, ct);
+
     public List<TrailerRecord> PickRandom(string storagePath, int count, PoolIndex? index = null)
     {
+        if (!IsEnabled) return new List<TrailerRecord>();
         index ??= LoadAsync().GetAwaiter().GetResult();
         return ReadyEntries(index, storagePath).OrderBy(_ => Random.Shared.Next()).Take(Math.Max(1, count)).ToList();
+    }
+
+    sealed class UploadDateComparer : IComparer<string>
+    {
+        public static readonly UploadDateComparer Instance = new();
+        public int Compare(string? x, string? y)
+        {
+            // YouTube upload_date is "YYYYMMDD"; empty dates sort as oldest so real dates win.
+            var xEmpty = string.IsNullOrEmpty(x); var yEmpty = string.IsNullOrEmpty(y);
+            if (xEmpty && yEmpty) return 0;
+            if (xEmpty) return -1;
+            if (yEmpty) return 1;
+            return string.Compare(x, y, StringComparison.Ordinal);
+        }
     }
 }

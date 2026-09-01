@@ -1,3 +1,4 @@
 plugin.js.backup-*
+*.backup-*
 Controllers/*.backup-*
 *.tar.gz

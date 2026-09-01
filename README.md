@@ -26,9 +26,11 @@ object:
 
 ```json
 "CinemaMode": {
-  "channel": "@KinomanTrailers",
+  "enabled": true,
+  "sources": ["@KinomanTrailers", "https://www.youtube.com/@AnotherChannel/videos"],
   "pool_size": 10,
   "trailers_per_movie": 3,
+  "delete_old": true,
   "storage_path": "/opt/lampac/wwwroot/trailers",
   "ytdlp_path": "/usr/local/bin/yt-dlp",
   "max_height": 1080,
@@ -37,7 +39,13 @@ object:
 }
 ```
 
-Pool size is hard-clamped to `1..10`; setting `pool_size` above 10 is ignored.
+`enabled=false` disables startup/periodic/manual downloads and makes `/random`
+return an empty list. `sources` accepts multiple YouTube channel handles or
+URLs; an older single `channel` value remains supported when `sources` is empty.
+`pool_size` controls the download/retention target and is hard-clamped to `1..10`.
+`trailers_per_movie` controls automatic and manual playback. With `delete_old=true`
+old CinemaMode-owned files are evicted to the bounded pool; with `false` they are
+left on disk. Files outside the CinemaMode-owned subdirectory are never touched.
 
 Endpoints: `/cinemamode.js`, `/cinemamode/pool`, `/cinemamode/random`,
 `/cinemamode/status`; `/cinemamode/refresh` is authenticated. `/pool` and

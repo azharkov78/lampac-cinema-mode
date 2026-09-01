@@ -2,7 +2,7 @@
     'use strict';
 
     var connect_host = '{localhost}';
-    var state = window.cinema_mode_state || { installed: false, active: false, runId: 0 };
+    var state = window.cinema_mode_state || { installed: false, active: false, runId: 0, playlistNextPrevious: null };
     window.cinema_mode_state = state;
 
     function notify(message) {
@@ -47,7 +47,25 @@
         return item.title ? item.title + ' (' + (index + 1) + '/' + total + ')' : 'Cinema Mode — трейлер ' + (index + 1) + '/' + total;
     }
 
+    function restorePlaylistAutonext() {
+        if (state.playlistNextPrevious === null) return;
+        if (Lampa.Storage && typeof Lampa.Storage.set === 'function') {
+            Lampa.Storage.set('playlist_next', state.playlistNextPrevious, true);
+        }
+        state.playlistNextPrevious = null;
+    }
+
+    function enablePlaylistAutonext() {
+        if (!Lampa.Storage || typeof Lampa.Storage.field !== 'function'
+            || typeof Lampa.Storage.set !== 'function') return;
+        if (state.playlistNextPrevious === null) {
+            state.playlistNextPrevious = !!Lampa.Storage.field('playlist_next');
+        }
+        Lampa.Storage.set('playlist_next', true, true);
+    }
+
     function openOriginal(originalOpen, args) {
+        restorePlaylistAutonext();
         state.active = false;
         state.pending = false;
         originalOpen.apply(Lampa.Player, args);
@@ -58,7 +76,7 @@
         var playlist = urls.map(function (item, index) {
             return { url: item.url, title: trailerLabel(item, index, urls.length), type: 'mp4', cinema_mode_bypass: true };
         });
-        if (movie.url) playlist.push({ url: movie.url, title: movie.title || 'Фильм', type: movie.type || 'mp4', cinema_mode_bypass: true });
+        if (movie.url) playlist.push({ url: movie.url, title: movie.title || 'Фильм', type: movie.type || 'mp4', cinema_mode_bypass: true, cinema_mode_movie: true });
         var first = urls[0];
         var data = Object.assign({}, movie, {
             url: first.url,
@@ -68,6 +86,7 @@
         });
         state.active = false;
         state.pending = false;
+        enablePlaylistAutonext();
         originalOpen.call(Lampa.Player, data);
     }
 
@@ -75,7 +94,7 @@
         state.active = true;
         state.pending = true;
         var runId = ++state.runId;
-        fetchJson(connect_host + '/cinemamode/random?n=3', function (data) {
+        fetchJson(connect_host + '/cinemamode/random', function (data) {
             var urls = normalizeTrailers(data);
             if (runId !== state.runId) return;
             if (!urls || !urls.length) {
@@ -118,10 +137,17 @@
         wrappedOpen.__cinemaModeWrapped = true;
         wrappedOpen.__cinemaModeOriginal = originalOpen;
         Lampa.Player.play = wrappedOpen;
+        if (Lampa.Player.listener && typeof Lampa.Player.listener.follow === 'function'
+            && !state.playerListenerInstalled) {
+            state.playerListenerInstalled = true;
+            Lampa.Player.listener.follow('start', function (data) {
+                if (data && data.cinema_mode_movie) restorePlaylistAutonext();
+            });
+        }
     }
 
     function manualCinemaMode() {
-        fetchJson(connect_host + '/cinemamode/random?n=3', function (data) {
+        fetchJson(connect_host + '/cinemamode/random', function (data) {
             var urls = normalizeTrailers(data);
             if (!urls || !urls.length) {
                 notify('Cinema Mode: пул трейлеров пуст');
@@ -146,12 +172,12 @@
             component: 'cinemamode',
             name: 'Cinema Mode',
             after: 'more',
-            icon: '<svg width="24" height="24" viewBox="0 0 24 24"><path d="M4 4h16v16H4z" fill="currentColor"/></svg>'
+            icon: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h18v13H3z"/><path d="m3 7 3-4 3 4 3-4 3 4 3-4 3 4"/><path d="M7 11h10M7 15h6"/></svg>'
         });
         Lampa.SettingsApi.addParam({
             component: 'cinemamode',
             param: { name: 'cinema_mode_start', type: 'trigger' },
-            field: { name: 'Запустить Cinema Mode', description: 'Ручной запуск трейлеров' },
+            field: { name: 'Ручной запуск', description: 'Запустить трейлеры вручную' },
             onChange: manualCinemaMode
         });
     }

@@ -44,6 +44,7 @@ public class ModInit : IModuleLoaded
         _pool = new TrailerPoolManager(
             _loggers.CreateLogger<TrailerPoolManager>(),
             new YtDlpRunner(_loggers.CreateLogger<YtDlpRunner>(), ResolveYtDlp(conf.ytdlp_path)));
+        _pool.IsEnabled = conf.enabled;
 
         StartRefreshLoop();
     }
@@ -73,6 +74,7 @@ public class ModInit : IModuleLoaded
         _pool = new TrailerPoolManager(
             _loggers.CreateLogger<TrailerPoolManager>(),
             new YtDlpRunner(_loggers.CreateLogger<YtDlpRunner>(), ResolveYtDlp(conf.ytdlp_path)));
+        if (conf != null) _pool.IsEnabled = conf.enabled;
     }
 
 
@@ -81,9 +83,14 @@ public class ModInit : IModuleLoaded
         StopRefreshLoop();
         _refreshCts = new CancellationTokenSource();
         var token = _refreshCts.Token;
-        if (conf?.refresh_on_start ?? true)
+        // Background refresh must do nothing when the operator has disabled the module.
+        if (conf?.enabled == true && (conf?.refresh_on_start ?? true))
         {
             _ = Task.Run(() => RunRefreshOnce(token));
+        }
+        else if (conf?.enabled == false)
+        {
+            _loggers.CreateLogger("CinemaMode").LogInformation("CinemaMode: enabled=false, background refresh skipped");
         }
         _refreshLoop = Task.Run(() => Loop(token));
     }
@@ -113,7 +120,16 @@ public class ModInit : IModuleLoaded
         {
             var current = conf;
             if (current == null || _pool == null) return;
-            await _pool.RefreshAsync(current.channel, current.pool_size, current.max_height, current.storage_path, token);
+            // Honour the master switch at execution time as well; config reloads can flip enabled mid-loop.
+            if (!current.enabled)
+            {
+                _pool.IsEnabled = false;
+                return;
+            }
+            _pool.IsEnabled = true;
+            var sources = current.EffectiveSources();
+            if (sources.Count == 0) return;
+            await _pool.RefreshAsync(sources, current.pool_size, current.max_height, current.storage_path, current.delete_old, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
