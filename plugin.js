@@ -176,8 +176,8 @@
         });
         Lampa.SettingsApi.addParam({
             component: 'cinemamode',
-            param: { name: 'cinema_mode_start', type: 'trigger' },
-            field: { name: 'Ручной запуск', description: 'Запустить трейлеры вручную' },
+            param: { name: 'cinema_mode_start', type: 'button' },
+            field: { name: 'Запустить трейлеры' },
             onChange: manualCinemaMode
         });
     }
