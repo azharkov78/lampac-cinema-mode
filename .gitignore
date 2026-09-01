@@ -1,0 +1,3 @@
+plugin.js.backup-*
+Controllers/*.backup-*
+*.tar.gz
