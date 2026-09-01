@@ -1,37 +1,63 @@
 # CinemaMode
 
-Lampac dynamic module: fetch the latest trailers from `@KinomanTrailers` with
-`yt-dlp`, retain a bounded local pool, and serve it to Lampa from Lampac static
-files.
+Опциональный dynamic-модуль для Lampac и Lampa, который загружает трейлеры с
+YouTube через `yt-dlp`, хранит ограниченный локальный пул и воспроизводит
+трейлеры перед выбранным фильмом.
 
-## S6 behaviour
+## Возможности
 
-- Channel: `@KinomanTrailers` by default.
-- Listing: only the latest `pool_size` videos are queried (`10` by default).
-- Storage: operator-supplied `storage_path` inside `/opt/lampac/wwwroot`; files
-  live in the `cinemamode/` subdirectory (e.g. `<storage>/cinemamode/<id>.mp4`).
-- Retention: at most `pool_size` (hard cap 10) CinemaMode-owned `11-char-id.mp4`
-  files inside that subdirectory, oldest `mtime` first. Other content in
-  `/opt/lampac/wwwroot` is never touched.
-- Refresh: every `refresh_minutes` (`360` = six hours) and once at startup when
-  `refresh_on_start` is true. The interval is re-read from config between cycles.
-- URL: `/trailers/cinemamode/<youtube-id>.mp4` (derived from the configured
-  storage path; never escapes `/opt/lampac/wwwroot`).
+- автоматическое воспроизведение трейлеров перед фильмом;
+- ручной запуск трейлеров из меню Lampa;
+- последовательное воспроизведение через штатный playlist Lampa;
+- автоматический запуск исходного фильма после последнего трейлера;
+- штатная кнопка `Next` во время воспроизведения playlist;
+- защита от повторного preroll для самих трейлеров;
+- fail-open: при пустом пуле или ошибке фильм запускается сразу;
+- ограниченный пул загруженных файлов;
+- поддержка нескольких YouTube-источников;
+- удаление только файлов, принадлежащих CinemaMode;
+- статус пула и ручное обновление через HTTP API.
 
-## Configuration
+Функция отключена по умолчанию и включается в конфигурации Lampac.
 
-Lampac reads this from `/opt/lampac/init.conf` via `ModuleInvoke.Init`. The file
-is JSON-format despite its `.conf` name; add or edit the top-level `CinemaMode`
-object:
+## Как это работает
+
+1. Модуль получает список последних видео из настроенных YouTube-источников.
+2. `yt-dlp` загружает подходящие ролики в локальное хранилище.
+3. В пуле сохраняется не больше заданного количества трейлеров.
+4. Клиент Lampa получает список доступных mp4-файлов.
+5. Перед фильмом создаётся native playlist из трейлеров и исходного фильма.
+6. После последнего трейлера Lampa продолжает воспроизведение фильма.
+
+В пул попадают только существующие mp4-файлы размером не менее 100 КБ.
+
+## Установка
+
+Создайте каталог модуля в `mods/CinemaMode/` и скопируйте в него файлы проекта.
+Lampac скомпилирует dynamic-модуль при запуске. Для работы загрузчика должен
+быть установлен `yt-dlp`.
+
+Клиентский плагин подключается в Lampa по адресу:
+
+```text
+https://<адрес-lampac>/cinemamode.js
+```
+
+## Конфигурация
+
+Добавьте в `init.conf` верхнеуровневый объект `CinemaMode`:
 
 ```json
 "CinemaMode": {
   "enabled": true,
-  "sources": ["@KinomanTrailers", "https://www.youtube.com/@AnotherChannel/videos"],
+  "sources": [
+    "@KinomanTrailers",
+    "https://www.youtube.com/@AnotherChannel/videos"
+  ],
   "pool_size": 10,
   "trailers_per_movie": 3,
   "delete_old": true,
-  "storage_path": "/opt/lampac/wwwroot/trailers",
+  "storage_path": "/lampac/wwwroot/trailers",
   "ytdlp_path": "/usr/local/bin/yt-dlp",
   "max_height": 1080,
   "refresh_minutes": 360,
@@ -39,21 +65,56 @@ object:
 }
 ```
 
-`enabled=false` disables startup/periodic/manual downloads and makes `/random`
-return an empty list. `sources` accepts multiple YouTube channel handles or
-URLs; an older single `channel` value remains supported when `sources` is empty.
-`pool_size` controls the download/retention target and is hard-clamped to `1..10`.
-`trailers_per_movie` controls automatic and manual playback. With `delete_old=true`
-old CinemaMode-owned files are evicted to the bounded pool; with `false` they are
-left on disk. Files outside the CinemaMode-owned subdirectory are never touched.
+Файл `init.conf` имеет формат JSON, несмотря на расширение `.conf`.
 
-Endpoints: `/cinemamode.js`, `/cinemamode/pool`, `/cinemamode/random`,
-`/cinemamode/status`; `/cinemamode/refresh` is authenticated. `/pool` and
-`/random` only return entries whose mp4 exists on disk and is at least 100 KB.
+Параметры:
 
-## Verification limitation
+- `enabled` — включает или выключает модуль;
+- `sources` — список YouTube-каналов или URL плейлистов;
+- `pool_size` — целевой размер пула, жёстко ограничен диапазоном от 1 до 10;
+- `trailers_per_movie` — количество трейлеров перед фильмом;
+- `delete_old` — удалять ли устаревшие файлы CinemaMode;
+- `storage_path` — каталог хранения трейлеров;
+- `ytdlp_path` — путь к исполняемому файлу `yt-dlp`;
+- `max_height` — максимальная высота видео;
+- `refresh_minutes` — интервал обновления пула;
+- `refresh_on_start` — обновлять ли пул после запуска Lampac.
 
-S6 has the .NET 10 runtime but no SDK, therefore no `dotnet build` can be run
-there. The Lampac dynamic-module loader compiles source when the module loads.
-Deployment verification must check `lampac.service`, `/cinemamode/status`, a
-manual authenticated refresh, and the on-disk file cap.
+Старый одиночный параметр `channel` поддерживается для обратной совместимости,
+если `sources` не задан.
+
+При `enabled: false` отключаются загрузка при запуске, периодическое обновление
+и ручная загрузка. Endpoint `/cinemamode/random` в этом режиме возвращает пустой
+список.
+
+При `delete_old: true` удаляются только принадлежащие CinemaMode файлы внутри
+его каталога хранения. Файлы в других каталогах не затрагиваются.
+
+## HTTP API
+
+- `/cinemamode.js` — клиентский плагин Lampa;
+- `/cinemamode/pool` — текущий пул трейлеров;
+- `/cinemamode/random` — случайные доступные трейлеры;
+- `/cinemamode/status` — состояние модуля и пула;
+- `/cinemamode/refresh` — ручное обновление пула, требует авторизации.
+
+`/pool` и `/random` возвращают только записи, для которых mp4-файл существует и
+имеет размер не менее 100 КБ.
+
+## Структура проекта
+
+```text
+Controllers/   HTTP-контроллеры CinemaMode
+Models/        модели пула и трейлера
+Services/      загрузка и управление пулом
+ModInit.cs     инициализация и периодическое обновление
+ModuleConf.cs  конфигурация модуля
+manifest.json  описание dynamic-модуля
+plugin.js      клиентский плагин Lampa
+```
+
+## Ограничения
+
+Модуль использует только публичные источники YouTube и внешний исполняемый файл
+`yt-dlp`. Доступность и правила использования конкретных источников определяются
+их владельцами и условиями YouTube.
