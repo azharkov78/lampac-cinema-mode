@@ -41,7 +41,7 @@ public class CinemaModeController : BaseController
         var conf = ModInit.conf;
         if (!conf.enabled) return ContentTo("[]", "application/json");
         var perRequest = n ?? conf.trailers_per_movie;
-        var picked = pool.PickRandom(conf.storage_path, Math.Clamp(perRequest, 1, Math.Min(10, Math.Max(1, conf.pool_size))));
+        var picked = pool.PickRandom(conf.storage_path, Math.Clamp(perRequest, 1, conf.EffectiveStorageCount()));
         return ContentTo(Newtonsoft.Json.JsonConvert.SerializeObject(picked.Select(t => new { url = $"{host}/{t.file_url}", title = t.title }).ToArray()), "application/json");
     }
 
@@ -61,7 +61,7 @@ public class CinemaModeController : BaseController
             {
                 return ContentTo("{\"error\":\"no_sources\"}", "application/json");
             }
-            var updated = await pool.RefreshAsync(sources, conf.pool_size, conf.max_height, conf.storage_path, conf.delete_old, ct).ConfigureAwait(false);
+            var updated = await pool.RefreshAsync(sources, conf.EffectiveDownloadCount(), conf.EffectiveStorageCount(), conf.max_height, conf.storage_path, conf.delete_old, ct).ConfigureAwait(false);
             return ContentTo(Newtonsoft.Json.JsonConvert.SerializeObject(updated), "application/json");
         }
         catch (Exception ex)
@@ -81,9 +81,11 @@ public class CinemaModeController : BaseController
         return ContentTo(
             $"enabled={conf.enabled}\n" +
             $"delete_old={conf.delete_old}\n" +
+            $"download_count={conf.EffectiveDownloadCount()}\n" +
+            $"storage_count={conf.EffectiveStorageCount()}\n" +
             $"trailers_per_movie={conf.trailers_per_movie}\n" +
             $"sources={index.channel}\n" +
-            $"pool_size={ready.Count}\n" +
+            $"ready_count={ready.Count}\n" +
             $"downloaded={ready.Count}\n" +
             $"updated_at={index.updated_at}\n",
             "text/plain");

@@ -59,7 +59,7 @@ public class ModInit : IModuleLoaded
     void updateConf()
     {
         conf = ModuleInvoke.Init("CinemaMode", new ModuleConf());
-        if ((conf == null || string.IsNullOrWhiteSpace(conf.channel) || conf.pool_size <= 0)
+        if ((conf == null || string.IsNullOrWhiteSpace(conf.channel))
             && CoreInit.CurrentConf != null
             && CoreInit.CurrentConf.TryGetValue("CinemaMode", out var raw))
         {
@@ -129,7 +129,7 @@ public class ModInit : IModuleLoaded
             _pool.IsEnabled = true;
             var sources = current.EffectiveSources();
             if (sources.Count == 0) return;
-            await _pool.RefreshAsync(sources, current.pool_size, current.max_height, current.storage_path, current.delete_old, token).ConfigureAwait(false);
+            await _pool.RefreshAsync(sources, current.EffectiveDownloadCount(), current.EffectiveStorageCount(), current.max_height, current.storage_path, current.delete_old, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)

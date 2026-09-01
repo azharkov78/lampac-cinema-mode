@@ -6,7 +6,7 @@
 - [x] Background refresh is a `Task.Run` loop in `Loaded()`, not a hosted service. Cancellation through `Dispose`.
 - [x] TrailerPoolManager obtained via `ModInit.Pool` static accessor — no DI registration needed.
 - [x] Storage path anchored to `<wwwroot>/trailers/cinemamode/`, owned-marker via parent directory.
-- [x] Pool size hard-clamped 1..10 (`HardPoolCap`).
+- [x] Download and storage counts are independently configurable and clamped 1..100 (`HardCountCap`).
 - [x] Ready entries require file present AND `Length >= 100 KB`.
 - [x] Process timeout 5 min, child tree kill + reap on cancel.
 - [x] Refresh interval re-read between cycles.

@@ -15,13 +15,19 @@ public class ModuleConf : ModuleBaseConf
     /// <summary>Legacy single-channel field. Used as a source if sources is empty after deserialization.</summary>
     public string channel { get; set; } = "@KinomanTrailers";
 
-    /// <summary>Maximum number of CinemaMode-owned trailers retained on disk. Hard-clamped 1..10.</summary>
+    /// <summary>Legacy combined limit. Used only when download_count/storage_count are not set.</summary>
     public int pool_size { get; set; } = 10;
+
+    /// <summary>Maximum number of new trailers downloaded during one refresh.</summary>
+    public int download_count { get; set; }
+
+    /// <summary>Maximum number of CinemaMode-owned trailers retained on disk.</summary>
+    public int storage_count { get; set; }
 
     /// <summary>How many trailers to play per movie / per manual start.</summary>
     public int trailers_per_movie { get; set; } = 3;
 
-    /// <summary>When true, retention evicts oldest owned files to honour pool_size.</summary>
+    /// <summary>When true, retention evicts oldest owned files to honour storage_count.</summary>
     public bool delete_old { get; set; } = true;
 
     public string storage_path { get; set; } = "/opt/lampac/wwwroot/trailers";
@@ -29,6 +35,11 @@ public class ModuleConf : ModuleBaseConf
     public int max_height { get; set; } = 1080;
     public int refresh_minutes { get; set; } = 360;
     public bool refresh_on_start { get; set; } = true;
+
+    public int EffectiveDownloadCount() => Math.Clamp(download_count > 0 ? download_count : LegacyPoolSize(), 1, 100);
+    public int EffectiveStorageCount() => Math.Clamp(storage_count > 0 ? storage_count : LegacyPoolSize(), 1, 100);
+
+    int LegacyPoolSize() => pool_size > 0 ? pool_size : 10;
 
     /// <summary>Effective list of sources, falling back to legacy <c>channel</c> when sources is empty.</summary>
     public IReadOnlyList<string> EffectiveSources()

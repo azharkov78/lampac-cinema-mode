@@ -17,7 +17,7 @@ public class TrailerPoolManager
     const string WwwRoot = "/opt/lampac/wwwroot";
     const string OwnedSubdirectory = "cinemamode";
     const long MinPlayableBytes = 100_000;
-    const int HardPoolCap = 10;
+    const int HardCountCap = 100;
     static readonly Regex YouTubeId = new("^[A-Za-z0-9_-]{11}$", RegexOptions.Compiled);
     static readonly Regex Handle = new("^@[A-Za-z0-9._-]{1,40}$", RegexOptions.Compiled);
     static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
@@ -123,12 +123,14 @@ public class TrailerPoolManager
 
     /// <summary>
     /// Refreshes the pool by pulling the latest trailers from each configured source, deduping by YouTube id,
-    /// downloading new entries until the bounded pool is full, and (optionally) evicting oldest owned files.
-    /// Hard cap of <see cref="HardPoolCap"/> is always enforced on <paramref name="poolSize"/>.
+    /// downloading at most <paramref name="downloadCount"/> new entries, and (optionally) evicting oldest
+    /// owned files until <paramref name="storageCount"/> remains. Both counts are bounded to 1..100.
     /// </summary>
-    public async Task<PoolIndex> RefreshAsync(IReadOnlyList<string> sources, int poolSize, int maxHeight, string storagePath, bool deleteOld, CancellationToken ct)
+    public async Task<PoolIndex> RefreshAsync(IReadOnlyList<string> sources, int downloadCount, int storageCount, int maxHeight, string storagePath, bool deleteOld, CancellationToken ct)
     {
-        poolSize = Math.Clamp(poolSize, 1, HardPoolCap); maxHeight = maxHeight <= 0 ? 1080 : maxHeight;
+        downloadCount = Math.Clamp(downloadCount, 1, HardCountCap);
+        storageCount = Math.Clamp(storageCount, 1, HardCountCap);
+        maxHeight = maxHeight <= 0 ? 1080 : maxHeight;
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -145,12 +147,12 @@ public class TrailerPoolManager
                 return await LoadAsync().ConfigureAwait(false);
             }
 
-            // Fetch the latest poolSize entries from every source so we have enough to dedupe + fill the pool.
+            // Fetch enough recent entries to fill storage_count while respecting the per-refresh download budget.
             var merged = new Dictionary<string, TrailerRecord>(StringComparer.Ordinal);
             foreach (var src in cleanSources)
             {
                 ct.ThrowIfCancellationRequested();
-                var fetched = await FetchLatestAsync(src, poolSize, storagePath, ct).ConfigureAwait(false);
+                var fetched = await FetchLatestAsync(src, Math.Max(downloadCount, storageCount), storagePath, ct).ConfigureAwait(false);
                 foreach (var trailer in fetched)
                 {
                     if (merged.TryGetValue(trailer.id, out var existing))
@@ -171,7 +173,7 @@ public class TrailerPoolManager
             // upload_date is YYYYMMDD so ordinal string comparison matches newest-first when sorted descending.
             var latest = merged.Values
                 .OrderByDescending(t => t.upload_date, UploadDateComparer.Instance)
-                .Take(poolSize)
+                .Take(storageCount)
                 .ToList();
 
             if (latest.Count == 0) { _log.LogWarning("CinemaMode: refresh skipped because latest playlist is empty"); return await LoadAsync().ConfigureAwait(false); }
@@ -179,6 +181,8 @@ public class TrailerPoolManager
             var existingIndex = await LoadAsync().ConfigureAwait(false);
             var byId = existingIndex.trailers.Where(t => YouTubeId.IsMatch(t.id)).GroupBy(t => t.id).ToDictionary(g => g.Key, g => g.First());
             var next = new PoolIndex { channel = string.Join(",", cleanSources), updated_at = DateTime.UtcNow.ToString("o"), trailers = new List<TrailerRecord>() };
+            var downloadedThisRefresh = 0;
+            var budgetLogged = false;
             foreach (var trailer in latest)
             {
                 var target = Path.Combine(storage, trailer.id + ".mp4");
@@ -188,8 +192,18 @@ public class TrailerPoolManager
                     if (string.IsNullOrEmpty(trailer.downloaded_at)) trailer.downloaded_at = File.GetLastWriteTimeUtc(target).ToString("o");
                     trailer.size_bytes = new FileInfo(target).Length; next.trailers.Add(trailer); continue;
                 }
+                if (downloadedThisRefresh >= downloadCount)
+                {
+                    if (!budgetLogged)
+                    {
+                        _log.LogInformation("CinemaMode: download budget reached ({Count})", downloadCount);
+                        budgetLogged = true;
+                    }
+                    continue;
+                }
                 var result = await _ytdlp.DownloadAsync("https://www.youtube.com/watch?v=" + trailer.id, target, maxHeight, ct).ConfigureAwait(false);
                 if (!result.ok) { _log.LogWarning("CinemaMode: download failed for {Id}: {Error}", trailer.id, result.stderr); continue; }
+                downloadedThisRefresh++;
                 trailer.downloaded_at = DateTime.UtcNow.ToString("o"); trailer.size_bytes = new FileInfo(target).Length; next.trailers.Add(trailer);
             }
 
@@ -198,7 +212,7 @@ public class TrailerPoolManager
             if (deleteOld)
             {
                 var owned = Directory.EnumerateFiles(storage, "*.mp4").Select(path => new FileInfo(path)).Where(IsOwnedFile).OrderBy(f => f.LastWriteTimeUtc).ToList();
-                while (owned.Count > poolSize)
+                while (owned.Count > storageCount)
                 {
                     var victim = owned[0]; victim.Delete(); owned.RemoveAt(0);
                     next.trailers.RemoveAll(t => string.Equals(t.id, Path.GetFileNameWithoutExtension(victim.Name), StringComparison.Ordinal));
@@ -219,7 +233,7 @@ public class TrailerPoolManager
 
     /// <summary>Legacy single-channel overload kept for backward compatibility.</summary>
     public Task<PoolIndex> RefreshAsync(string channel, int poolSize, int maxHeight, string storagePath, CancellationToken ct)
-        => RefreshAsync(new[] { channel }, poolSize, maxHeight, storagePath, deleteOld: true, ct);
+        => RefreshAsync(new[] { channel }, poolSize, poolSize, maxHeight, storagePath, deleteOld: true, ct);
 
     public List<TrailerRecord> PickRandom(string storagePath, int count, PoolIndex? index = null)
     {

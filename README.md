@@ -54,6 +54,8 @@ https://<адрес-lampac>/cinemamode.js
     "@KinomanTrailers",
     "https://www.youtube.com/@AnotherChannel/videos"
   ],
+  "download_count": 5,
+  "storage_count": 20,
   "pool_size": 10,
   "trailers_per_movie": 3,
   "delete_old": true,
@@ -71,7 +73,9 @@ https://<адрес-lampac>/cinemamode.js
 
 - `enabled` — включает или выключает модуль;
 - `sources` — список YouTube-каналов или URL плейлистов;
-- `pool_size` — целевой размер пула, жёстко ограничен диапазоном от 1 до 10;
+- `download_count` — максимум новых роликов, загружаемых за один refresh; диапазон от 1 до 100;
+- `storage_count` — максимум принадлежащих CinemaMode роликов, хранимых на диске; диапазон от 1 до 100;
+- `pool_size` — устаревший общий параметр для совместимости; используется только если `download_count` и `storage_count` не заданы;
 - `trailers_per_movie` — количество трейлеров перед фильмом;
 - `delete_old` — удалять ли устаревшие файлы CinemaMode;
 - `storage_path` — каталог хранения трейлеров;
@@ -89,6 +93,11 @@ https://<адрес-lampac>/cinemamode.js
 
 При `delete_old: true` удаляются только принадлежащие CinemaMode файлы внутри
 его каталога хранения. Файлы в других каталогах не затрагиваются.
+
+`download_count` и `storage_count` независимы: например, при значениях `5` и
+`20` один цикл загрузит не более пяти новых роликов, а на диске может храниться
+до двадцати роликов. Фактическое число может быть меньше из-за недоступных или
+невалидных видео.
 
 ## HTTP API
 
