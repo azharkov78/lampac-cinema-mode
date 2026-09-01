@@ -14,6 +14,10 @@ namespace CinemaMode.Controllers;
 
 public class CinemaModeController : BaseController
 {
+    static readonly SemaphoreSlim ManualRefreshGate = new(1, 1);
+    static readonly TimeSpan ManualRefreshCooldown = TimeSpan.FromMinutes(5);
+    static long LastManualRefreshTicks;
+
     [HttpGet, AllowAnonymous, Route("cinemamode.js"), Route("cinemamode/js/{token}")]
     [Staticache(cacheMinutes: 10, always: true, setHeadersNoCache: true)]
     public ActionResult Plugin(string token)
@@ -45,31 +49,56 @@ public class CinemaModeController : BaseController
         return ContentTo(Newtonsoft.Json.JsonConvert.SerializeObject(picked.Select(t => new { url = $"{host}/{t.file_url}", title = t.title }).ToArray()), "application/json");
     }
 
-    [HttpGet, Authorize, Route("cinemamode/refresh")]
+    [HttpGet, AllowAnonymous, Route("cinemamode/refresh")]
     public async Task<ActionResult> Refresh(CancellationToken ct)
     {
         var pool = PoolManager(); if (pool == null || ModInit.conf == null) return ContentTo("{}", "application/json");
         var conf = ModInit.conf;
-        try
+        if (!conf.enabled)
         {
-            if (!conf.enabled)
-            {
-                return ContentTo("{\"disabled\":true}", "application/json");
-            }
-            var sources = conf.EffectiveSources();
-            if (sources.Count == 0)
-            {
-                return ContentTo("{\"error\":\"no_sources\"}", "application/json");
-            }
-            var updated = await pool.RefreshAsync(sources, conf.EffectiveDownloadCount(), conf.EffectiveStorageCount(), conf.max_height, conf.storage_path, conf.delete_old, ct).ConfigureAwait(false);
-            return ContentTo(Newtonsoft.Json.JsonConvert.SerializeObject(updated), "application/json");
+            return ContentTo("{\"disabled\":true}", "application/json");
         }
-        catch (Exception ex)
+        var sources = conf.EffectiveSources();
+        if (sources.Count == 0)
         {
-            var logger = HttpContext.RequestServices.GetService(typeof(ILogger<CinemaModeController>)) as ILogger<CinemaModeController>;
-            logger?.LogError(ex, "CinemaMode: manual refresh failed");
-            return ContentTo("{\"error\":\"refresh_failed\"}", "application/json");
+            return ContentTo("{\"error\":\"no_sources\"}", "application/json");
         }
+        if (!ManualRefreshGate.Wait(0))
+        {
+            Response.StatusCode = 202;
+            return ContentTo("{\"accepted\":true,\"in_progress\":true}", "application/json");
+        }
+
+        var now = DateTime.UtcNow;
+        var last = new DateTime(Interlocked.Read(ref LastManualRefreshTicks), DateTimeKind.Utc);
+        var remaining = ManualRefreshCooldown - (now - last);
+        if (last.Ticks > 0 && remaining > TimeSpan.Zero)
+        {
+            ManualRefreshGate.Release();
+            Response.StatusCode = 429;
+            Response.Headers["Retry-After"] = ((int)Math.Ceiling(remaining.TotalSeconds)).ToString();
+            return ContentTo("{\"error\":\"refresh_rate_limited\"}", "application/json");
+        }
+        Interlocked.Exchange(ref LastManualRefreshTicks, now.Ticks);
+
+        var logger = HttpContext.RequestServices.GetService(typeof(ILogger<CinemaModeController>)) as ILogger<CinemaModeController>;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await pool.RefreshAsync(sources, conf.EffectiveDownloadCount(), conf.EffectiveStorageCount(), conf.max_height, conf.storage_path, conf.delete_old, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger?.LogError(ex, "CinemaMode: manual refresh failed");
+            }
+            finally
+            {
+                ManualRefreshGate.Release();
+            }
+        });
+        Response.StatusCode = 202;
+        return ContentTo("{\"accepted\":true,\"in_progress\":true}", "application/json");
     }
 
     [HttpGet, AllowAnonymous, Route("cinemamode/status")]
